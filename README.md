@@ -1,4 +1,4 @@
-# solana_wallet_adapter
+# solana-ruby-wallet-adapter
 
 A Ruby on Rails gem port of [@solana/wallet-adapter](https://github.com/pzupan/wallet-adapter), with [Sorbet](https://sorbet.org) static types throughout.
 
@@ -36,7 +36,7 @@ Provides:
 Add to your `Gemfile`:
 
 ```ruby
-gem "solana_wallet_adapter"
+gem "solana_ruby_wallet_adapter"
 ```
 
 Then run:

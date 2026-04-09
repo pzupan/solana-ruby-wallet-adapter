@@ -3,7 +3,7 @@
 require_relative "lib/solana_wallet_adapter/version"
 
 Gem::Specification.new do |spec|
-  spec.name    = "solana_wallet_adapter"
+  spec.name    = "solana_ruby_wallet_adapter"
   spec.version = SolanaWalletAdapter::VERSION
   spec.authors = ["pzupan"]
   spec.email   = []
@@ -14,7 +14,7 @@ Gem::Specification.new do |spec|
     abstractions, server-side signature verification, Sign-In-With-Solana
     (SIWS) helpers, and a wallet registry for Rails applications.
   DESC
-  spec.homepage = "https://github.com/pzupan/wallet-adapter"
+  spec.homepage = "https://github.com/pzupan/solana-ruby-wallet-adapter"
   spec.license  = "Apache-2.0"
 
   spec.required_ruby_version = ">= 3.2"
