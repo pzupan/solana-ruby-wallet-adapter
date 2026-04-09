@@ -1,0 +1,6 @@
+--dir
+lib
+--dir
+sig
+--ignore
+lib/solana_wallet_adapter/railtie.rb
