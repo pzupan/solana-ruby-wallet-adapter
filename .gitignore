@@ -12,6 +12,8 @@ pickle-email-*.html
 .claude
 CLAUDE.md
 
+solana_ruby_wallet_adapter-*.gem
+
 # Ignore all logfiles and tempfiles.
 /log/*
 /tmp/*
