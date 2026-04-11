@@ -361,24 +361,40 @@ picker and handles any server-side signature work.
 **Flow:**
 1. Rails layout seeds registered wallet metadata into `window.__SOLANA_WALLETS__`.
 2. A Stimulus controller detects the wallet, connects, and collects the SOL amount.
-3. The browser POSTs `{ public_key, sol }` to a Rails endpoint.
-4. The Rails controller builds a `createAccount + initialize + delegate` transaction,
+3. The browser POSTs `{ public_key, sol }` to `/staking/prepare`.
+4. The Rails controller builds a `createAccount + delegate` transaction,
    partially signs it with the generated stake-account keypair, and returns
    the wire bytes as Base64.
-5. The Stimulus controller passes the bytes to the wallet for the user's signature,
-   then broadcasts the fully-signed transaction.
+5. The Stimulus controller passes the bytes to the wallet for the user's signature.
+6. The signed wire bytes are POSTed to `/staking/submit`.
+7. Rails verifies every Ed25519 signature via `WalletStandard`, then broadcasts
+   to the cluster and returns the transaction signature.
 
-#### Layout — seed wallet metadata
+#### Environment — RPC credentials
 
-```erb
-<%# app/views/layouts/application.html.erb %>
-<head>
-  <%# ... %>
-  <script>window.__SOLANA_WALLETS__ = <%= solana_wallets_json.html_safe %>;</script>
-</head>
+Store your RPC API key in `.env` (already gitignored by Rails):
+
+```
+# .env
+HELIUS_API_KEY=your-api-key-here
 ```
 
-#### Initializer — register adapters
+#### Initializer — configure solana-ruby-kit and register adapters
+
+```ruby
+# config/initializers/solana_ruby_kit.rb
+Solana::Ruby::Kit.configure do |config|
+  if Rails.env.production?
+    config.rpc_url = "https://mainnet.helius-rpc.com/?api-key=#{ENV.fetch('HELIUS_API_KEY')}"
+    config.ws_url  = "wss://mainnet.helius-rpc.com/?api-key=#{ENV.fetch('HELIUS_API_KEY')}"
+  else
+    config.rpc_url = "https://devnet.helius-rpc.com/?api-key=#{ENV.fetch('HELIUS_API_KEY')}"
+    config.ws_url  = "wss://devnet.helius-rpc.com/?api-key=#{ENV.fetch('HELIUS_API_KEY')}"
+  end
+  config.commitment = :confirmed
+  config.timeout    = 30
+end
+```
 
 ```ruby
 # config/initializers/solana_wallet_adapter.rb
@@ -391,7 +407,21 @@ SolanaWalletAdapter::WalletRegistry.register(
 )
 ```
 
-#### Rails controller — build and partially sign the transaction
+#### Layout — seed wallet metadata
+
+```erb
+<%# app/views/layouts/application.html.erb %>
+<head>
+  <%# ... %>
+  <script>window.__SOLANA_WALLETS__ = <%= solana_wallets_json.html_safe %>;</script>
+</head>
+```
+
+#### Rails controller — build, verify, and broadcast
+
+`Solana::Ruby::Kit.rpc_client` picks up the URL configured in the initializer.
+`WalletStandard.verify_signed_transaction!` decodes the wire bytes returned by
+the browser wallet and verifies every Ed25519 signature before broadcasting.
 
 ```ruby
 # app/controllers/staking_controller.rb
@@ -399,14 +429,15 @@ require 'base64'
 
 class StakingController < ApplicationController
   VOTE_ACCOUNT = '26RGqX3mezgYDxJnGh94gnMM4L2k9grH1eWcTSCHnaxR'
-  RPC_URL      = 'https://api.mainnet-beta.solana.com'
 
   # POST /staking/prepare
+  # Builds and partially signs a stake transaction server-side.
+  # Returns a base64-encoded wire transaction ready for the user's wallet to sign.
   def prepare
     public_key = params.require(:public_key)
     lamports   = (params.require(:sol).to_f * 1_000_000_000).to_i
 
-    rpc              = Solana::Ruby::Kit::Rpc::Client.new(RPC_URL)
+    rpc              = Solana::Ruby::Kit.rpc_client
     blockhash_result = rpc.get_latest_blockhash
     blockhash        = blockhash_result.value.blockhash
     last_valid       = blockhash_result.value.last_valid_block_height
@@ -414,7 +445,7 @@ class StakingController < ApplicationController
     owner         = Solana::Ruby::Kit::Addresses::Address.new(public_key)
     stake_kp      = Solana::Ruby::Kit::Keys.generate_key_pair
     stake_address = Solana::Ruby::Kit::Addresses::Address.new(
-      Solana::Ruby::Kit::Encoding::Base58.encode(stake_kp.verify_key.to_bytes)
+      Solana::Ruby::Kit::Addresses.encode_address(stake_kp.verify_key.to_bytes)
     )
 
     create_ixs = Solana::Ruby::Kit::Programs::StakeProgram.create_account_instructions(
@@ -448,14 +479,34 @@ class StakingController < ApplicationController
   rescue => e
     render json: { error: e.message }, status: :unprocessable_entity
   end
+
+  # POST /staking/submit
+  # Receives a wallet-signed transaction (base64 wire bytes), verifies every
+  # Ed25519 signature server-side via WalletStandard, then broadcasts to the
+  # cluster and returns the transaction signature.
+  def submit
+    signed_b64 = params.require(:signed_transaction)
+    wire_bytes = Base64.strict_decode64(signed_b64)
+
+    tx = Solana::Ruby::Kit::WalletStandard.verify_signed_transaction!(wire_bytes)
+    Solana::Ruby::Kit::Transactions.assert_fully_signed_transaction!(tx)
+
+    rpc = Solana::Ruby::Kit.rpc_client
+    sig = rpc.send_transaction(signed_b64)
+
+    render json: { signature: sig.value }
+  rescue => e
+    render json: { error: e.message }, status: :unprocessable_entity
+  end
 end
 ```
 
-#### Route
+#### Routes
 
 ```ruby
 # config/routes.rb
 post '/staking/prepare', to: 'staking#prepare'
+post '/staking/submit',  to: 'staking#submit'
 ```
 
 #### ViewComponent — Stimulus markup
@@ -494,20 +545,20 @@ post '/staking/prepare', to: 'staking#prepare'
 
 #### Stimulus controller — wallet connection and signing
 
+The signed transaction is POSTed back to Rails for server-side verification and
+broadcasting. No RPC credentials are needed in the browser.
+
 ```js
 // app/javascript/controllers/stake_controller.js
 import { Controller } from "@hotwired/stimulus"
-import { Connection, Transaction } from "@solana/web3.js"
-
-const RPC_URL = "https://api.mainnet-beta.solana.com"
+import { Transaction } from "@solana/web3.js"
 
 export default class extends Controller {
   static targets = ["connectButton", "input", "stakeButton", "status"]
 
   connect() {
-    this.provider   = null
-    this.publicKey  = null
-    this.connection = new Connection(RPC_URL, "confirmed")
+    this.provider  = null
+    this.publicKey = null
     this.detectWallet()
   }
 
@@ -562,9 +613,16 @@ export default class extends Controller {
       const signedTx = await this.provider.signTransaction(tx)
 
       this.setStatus("Broadcasting…")
-      const sig = await this.connection.sendRawTransaction(signedTx.serialize())
-      await this.connection.confirmTransaction(sig, "confirmed")
-      this.setStatus(`Staked! Tx: ${sig.slice(0, 20)}…`)
+      const signedB64 = btoa(String.fromCharCode(...signedTx.serialize()))
+      const submitResp = await fetch("/staking/submit", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        body:    JSON.stringify({ signed_transaction: signedB64 }),
+      })
+      const submitData = await submitResp.json()
+      if (submitData.error) throw new Error(submitData.error)
+
+      this.setStatus(`Staked! Tx: ${submitData.signature.slice(0, 20)}…`)
     } catch (e) {
       this.setStatus(`Error: ${e.message}`)
       this.stakeButtonTarget.disabled = false
@@ -577,10 +635,23 @@ export default class extends Controller {
 }
 ```
 
-> **Note:** `@solana/web3.js` is still needed in the browser to deserialize the
-> server-built transaction (`Transaction.from`) and broadcast it via
-> `sendRawTransaction`.  All React and `@solana/wallet-adapter-react*` packages
-> can be removed from `package.json`.
+#### esbuild — IIFE format required
+
+`@solana/web3.js` uses `import.meta` internally. Bundle as IIFE and define
+`import.meta.url` away so the bundle runs as a plain script (no `type="module"`
+needed):
+
+```json
+// package.json
+"build": "esbuild app/javascript/application.js --bundle --sourcemap --format=iife --define:global=globalThis --define:import.meta.url=undefined --outdir=app/assets/builds --public-path=/assets"
+```
+
+> **Note:** `@solana/web3.js` is still needed in the browser solely to
+> deserialize the server-built transaction (`Transaction.from`) before passing it
+> to the wallet for signing. Broadcasting is handled server-side by
+> `WalletStandard` + `rpc.send_transaction`, so `Connection` and `sendRawTransaction`
+> are not used. All React and `@solana/wallet-adapter-react*` packages can be
+> removed from `package.json`.
 
 ---
 

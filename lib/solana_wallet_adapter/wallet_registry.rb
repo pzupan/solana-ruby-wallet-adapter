@@ -28,7 +28,7 @@ module SolanaWalletAdapter
       extend T::Sig
 
       # Register one or more adapter classes.
-      sig { params(adapter_classes: T::Array[T.class_of(BaseWalletAdapter)]).void }
+      sig { params(adapter_classes: T.class_of(BaseWalletAdapter)).void }
       def register(*adapter_classes)
         adapter_classes.each do |klass|
           instance = klass.new
