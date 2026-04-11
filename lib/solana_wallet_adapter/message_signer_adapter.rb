@@ -36,6 +36,8 @@ module SolanaWalletAdapter
 
   # Input parameters for a SIWS sign-in request.
   class SignInInput < T::Struct
+    extend T::Sig
+
     # The domain presenting the sign-in request (e.g. "example.com").
     const :domain,      String
 
